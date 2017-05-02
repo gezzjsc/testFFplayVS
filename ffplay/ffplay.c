@@ -167,15 +167,15 @@ typedef struct Frame {
     int height;
     AVRational sar;
 } Frame;
-
+/* http://www.zsllsz.com/ffplay-analyze.html */
 typedef struct FrameQueue {
-    Frame queue[FRAME_QUEUE_SIZE];
-    int rindex;
-    int windex;
-    int size;
-    int max_size;
-    int keep_last;
-    int rindex_shown;
+    Frame queue[FRAME_QUEUE_SIZE];   /* 存放frame的数组 */
+    int rindex;   /* 读指针，即队尾 */
+    int windex;   /* 写指针，即队头 */
+    int size;  /* 当前queue里有几个frame */
+    int max_size;   /* 最多能装几个frame */
+    int keep_last;   /* 是否保证队尾frame被显示后才能移动队尾（读）指针，视频被设为1，音频和字幕被设为0 */
+    int rindex_shown;  /* 读指针指向的那个frame是否已经被显示过了，是则等于1,否则等于0 */
     SDL_mutex *mutex;
     SDL_cond *cond;
     PacketQueue *pktq;
@@ -1537,14 +1537,14 @@ static void video_refresh(void *opaque, double *remaining_time)
             redisplay = frame_queue_prev(&is->pictq);
 retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
-            // nothing to do, no picture to display in the queue
-        } else {
+            // nothing to do, no picture to display in the queue  图片队列里没有图像，啥都干不成
+        } else { /*出队图片*/
             double last_duration, duration, delay;
-            Frame *vp, *lastvp;
+            Frame *vp, *lastvp; // lastvp代表上一帧，vp代表即将要显示的这一帧
 
-            /* dequeue the picture */
-            lastvp = frame_queue_peek_last(&is->pictq);
-            vp = frame_queue_peek(&is->pictq);
+            /* dequeue the picture  http://solasky.info/ */
+            lastvp = frame_queue_peek_last(&is->pictq);  //从缓存中获取上一帧
+            vp = frame_queue_peek(&is->pictq);  //从缓存中获取即将要显示的这一帧
 
             if (vp->serial != is->videoq.serial) {
                 frame_queue_next(&is->pictq);
@@ -1555,15 +1555,15 @@ retry:
             if (lastvp->serial != vp->serial && !redisplay)
                 is->frame_timer = av_gettime_relative() / 1000000.0;
 
-            if (is->paused)
+            if (is->paused) /*如果暂停中*/
                 goto display;
 
-            /* compute nominal last_duration */
-            last_duration = vp_duration(is, lastvp, vp);
+            /* compute nominal 名义上的last_duration */
+            last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔
             if (redisplay)
                 delay = 0.0;
             else
-                delay = compute_target_delay(last_duration, is);
+                delay = compute_target_delay(last_duration, is);  //根据视频时间钟与音频时间钟之间的差值，调节需要延迟的时间
 
             time= av_gettime_relative()/1000000.0;
             if (time < is->frame_timer + delay && !redisplay) {
@@ -1585,7 +1585,7 @@ retry:
                 duration = vp_duration(is, vp, nextvp);
                 if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
                     if (!redisplay)
-                        is->frame_drops_late++;
+                        is->frame_drops_late++; /*看来是执行了这里*/
                     frame_queue_next(&is->pictq);
                     redisplay = 0;
                     goto retry;
@@ -1622,7 +1622,7 @@ display:
             if (is->step && !is->paused)
                 stream_toggle_pause(is);
         }
-    }
+    } /*存在视频end*/
     is->force_refresh = 0;
     if (show_status) {
         static int64_t last_time;
@@ -1636,22 +1636,23 @@ display:
             vqsize = 0;
             sqsize = 0;
             if (is->audio_st)
-                aqsize = is->audioq.size;
+                aqsize = is->audioq.size; /*音频队列的大小*/
             if (is->video_st)
                 vqsize = is->videoq.size;
             if (is->subtitle_st)
                 sqsize = is->subtitleq.size;
             av_diff = 0;
-            if (is->audio_st && is->video_st)
+            /*计算av_diff*/
+            if (is->audio_st && is->video_st) /*音频和视频都有  音频时钟 - 视频时钟*/
                 av_diff = get_clock(&is->audclk) - get_clock(&is->vidclk);
-            else if (is->video_st)
+            else if (is->video_st) /*只有视频 主时钟- 视频时钟*/
                 av_diff = get_master_clock(is) - get_clock(&is->vidclk);
-            else if (is->audio_st)
+            else if (is->audio_st) /*只有音频  主时钟 - 音频时钟 */
                 av_diff = get_master_clock(is) - get_clock(&is->audclk);
             av_log(NULL, AV_LOG_INFO,
                    "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
                    get_master_clock(is)/*主时钟*/,
-                   (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
+                   (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")), /*音视频都有，显示 A-V*/
                    av_diff /*差值*/,
                    is->frame_drops_early + is->frame_drops_late  /*要丢掉，快速+1的时候会音频一卡一卡，然后aq和vq都是0*/,
                    aqsize / 1024,
@@ -1811,7 +1812,7 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
         duplicate_right_border_pixels(vp->bmp);
         /* update the bitmap content */
         SDL_UnlockYUVOverlay(vp->bmp);
-
+        /*传入的参数直接赋值在这里*/
         vp->pts = pts;
         vp->duration = duration;
         vp->pos = pos;
@@ -1848,7 +1849,7 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
                     diff - is->frame_last_filter_delay < 0 &&
                     is->viddec.pkt_serial == is->vidclk.serial &&
                     is->videoq.nb_packets) {
-                    is->frame_drops_early++;
+                    is->frame_drops_early++;  /*这里也有可能*/
                     av_frame_unref(frame);
                     got_picture = 0;
                 }
@@ -2181,7 +2182,7 @@ static int video_thread(void *arg)
     double pts;
     double duration;
     int ret;
-    AVRational tb = is->video_st->time_base;
+    AVRational tb = is->video_st->time_base; /*视频流的时间基准*/
     AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
 
 #if CONFIG_AVFILTER
@@ -2207,7 +2208,7 @@ static int video_thread(void *arg)
     }
 
     for (;;) {
-        ret = get_video_frame(is, frame);
+        ret = get_video_frame(is, frame); /*解码一帧，填充在此*/
         if (ret < 0)
             goto the_end;
         if (!ret)
@@ -2264,7 +2265,9 @@ static int video_thread(void *arg)
                 is->frame_last_filter_delay = 0;
             tb = filt_out->inputs[0]->time_base;
 #endif
+            /*根据帧率，计算每个帧应该的持续时间*/
             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+            /*读取出该帧的实际pts，tb是视频流的时间基准*/
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
             ret = queue_picture(is, frame, pts, duration, av_frame_get_pkt_pos(frame), is->viddec.pkt_serial);
             av_frame_unref(frame);
