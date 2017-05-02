@@ -11,7 +11,8 @@
 *.userprefs
 
 # Build results
-[Dd]ebug/
+#需要Debug目录，x86的默认在这里生成
+#[Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
@@ -250,3 +251,6 @@ paket-files/
 # JetBrains Rider
 .idea/
 *.sln.iml
+/Debug/*.exe
+ffplay/Debug/
+ffplay/x64/
