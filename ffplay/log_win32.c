@@ -1,4 +1,7 @@
-﻿#include "log_win32.h"
+﻿/*
+https://github.com/sontx/log-cpp/blob/master/log.cpp
+*/
+#include "log_win32.h"
 #include <stdarg.h>
 /*
 http://stackoverflow.com/questions/14386/fopen-deprecated-warning
@@ -74,13 +77,16 @@ void log_to_ide(const char * format, ...)
 
 void log_to_file(const char * format,...)
 {
+#if 0
     if(bCreateFile == 0){
        pLog= fopen(DEBUG_FILENAME, "a");
 	   fprintf(stderr,"DEBUG FILE [%s]",DEBUG_FILENAME);
        if(pLog!=NULL){
             bCreateFile = 1;
        }
-    }    
+    }
+#endif
+	FILE * pLog = fopen(DEBUG_FILENAME, "a");
 	if (pLog == NULL){
 		return;
     }
@@ -120,22 +126,17 @@ void log_to_file(const char * format,...)
 
 }
 void log_to_file_original(const char * format ,...) {
-	if (bCreateFile == 0) {
-		pLog = fopen(DEBUG_FILENAME, "a");
-		fprintf(stderr, "DEBUG FILE [%s]", DEBUG_FILENAME);
-		if (pLog != NULL) {
-			bCreateFile = 1;
-		}
-	}
-	if (pLog == NULL) {
-		return;
-	}
-	va_list args;
-	va_start(args, format);
-	vfprintf(pLog, format, args);
-	fputc('\n', pLog);
-	va_end(args);
-	fclose(pLog);
+
+		FILE * pLog = fopen(DEBUG_FILENAME, "a");
+		if (pLog == NULL)
+			return;
+		va_list args;
+		va_start(args, format);
+		vfprintf(pLog, format, args);
+		fputc('\n', pLog);
+		va_end(args);
+		fclose(pLog);
+
 }
 
 int myvprintf(const char *fmt, va_list args) {
