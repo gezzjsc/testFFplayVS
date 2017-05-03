@@ -1666,6 +1666,7 @@ display:
             f Timestamp error correction rate (Not 100% sure)            
             M-V, M-A means video stream only, audio stream only respectively.
             */
+            #if 0  /*新增的打印  v=%0.3f m=%0.3f d=%0.3f ，打印double类型的时间值*/
             av_log(NULL, AV_LOG_INFO,
                    "%7.2f %s:%7.3f fd=%4d(e=%d l=%d v=%0.3f m=%0.3f d=%0.3f) aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
                    get_master_clock(is)/*主时钟*/,
@@ -1679,8 +1680,23 @@ display:
                    sqsize,
                    is->video_st ? is->video_st->codec->pts_correction_num_faulty_dts : 0,
                    is->video_st ? is->video_st->codec->pts_correction_num_faulty_pts : 0);
+            #else
+            av_log(NULL, AV_LOG_INFO,
+                   "%7.2f %s:%7.3f fd=%4d(e=%d l=%d) aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
+                   get_master_clock(is)/*主时钟*/,
+                   (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")), /*音视频都有，显示 A-V*/
+                   av_diff /*差值*/,
+                   is->frame_drops_early + is->frame_drops_late  /*要丢掉，快速+1的时候会音频一卡一卡，然后aq和vq都是0*/,
+                   is->frame_drops_early/*主要是这里丢弃，而且A-V是负数，比如-0.1**就会出发*/,is->frame_drops_late,                   
+                   aqsize / 1024,
+                   vqsize / 1024,
+                   sqsize,
+                   is->video_st ? is->video_st->codec->pts_correction_num_faulty_dts : 0,
+                   is->video_st ? is->video_st->codec->pts_correction_num_faulty_pts : 0);
+            #endif
             fflush(stdout);
             last_time = cur_time;
+            
         }
     }
 }
@@ -1875,9 +1891,11 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
                     /*在这里打印输出的格式比较难看*/
                   //  av_log(NULL,AV_LOG_INFO,"v=%0.3f m=%0.3f d=%0.3f \n",dpts,get_master_clock(is),fabs(diff) );
                     /*暂存起来跟后面一起输出吧*/
-                    is->dropEarly_dpts=dpts;
+                    is->dropEarly_dpts=dpts; /*当前视频帧的时间戳*/
                     is->dropEarly_masterClock=get_master_clock( is);
                     is->dropEarly_fabsDiff= fabs(diff);
+                   // LOGD("---TEST---TEST----");
+                    LOGD("DROPEARLY v=%0.3f m_a=%0.3f d=%0.3f lf[%0.3f] s=%d n=%d", is->dropEarly_dpts,is->dropEarly_masterClock,is->dropEarly_fabsDiff,is->frame_last_filter_delay/*0.000*/,is->viddec.pkt_serial/*这个值是1*/,is->videoq.nb_packets );
                     is->frame_drops_early++;  /*主要是在这里*/
                     av_frame_unref(frame);
                     got_picture = 0;
