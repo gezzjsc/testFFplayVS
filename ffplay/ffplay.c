@@ -1362,15 +1362,16 @@ static void sync_clock_to_slave(Clock *c, Clock *slave)
         set_clock(c, slave_clock, slave->serial);
 }
 
+/*谁同步到谁呢？*/
 static int get_master_sync_type(VideoState *is) {
     if (is->av_sync_type == AV_SYNC_VIDEO_MASTER) {
         if (is->video_st)
             return AV_SYNC_VIDEO_MASTER;
         else
             return AV_SYNC_AUDIO_MASTER;
-    } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER) {
+    } else if (is->av_sync_type == AV_SYNC_AUDIO_MASTER) {/*默认是audio*/
         if (is->audio_st)
-            return AV_SYNC_AUDIO_MASTER;
+            return AV_SYNC_AUDIO_MASTER; /*音频存在，音频作为主时钟*/
         else
             return AV_SYNC_EXTERNAL_CLOCK;
     } else {
@@ -1649,12 +1650,23 @@ display:
                 av_diff = get_master_clock(is) - get_clock(&is->vidclk);
             else if (is->audio_st) /*只有音频  主时钟 - 音频时钟 */
                 av_diff = get_master_clock(is) - get_clock(&is->audclk);
+            /* http://stackoverflow.com/questions/27778678/what-are-mv-fd-aq-vq-sq-and-f-in-a-video-stream 
+            7.11 (master clock) is the time from start of the stream/video            
+            A-V (avdiff) Difference between audio and video timestamps            
+            fd Number of frames dropped            丢弃了多少帧
+            aq size of audio frame            
+            vq size of video frame            
+            sq size of subtitle frame            
+            f Timestamp error correction rate (Not 100% sure)            
+            M-V, M-A means video stream only, audio stream only respectively.
+            */
             av_log(NULL, AV_LOG_INFO,
-                   "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
+                   "%7.2f %s:%7.3f fd=%4d(e=%4d l=%4d) aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
                    get_master_clock(is)/*主时钟*/,
                    (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")), /*音视频都有，显示 A-V*/
                    av_diff /*差值*/,
                    is->frame_drops_early + is->frame_drops_late  /*要丢掉，快速+1的时候会音频一卡一卡，然后aq和vq都是0*/,
+                   is->frame_drops_early/*主要是这里丢弃，而且A-V是负数，比如-0.1**就会出发*/,is->frame_drops_late,
                    aqsize / 1024,
                    vqsize / 1024,
                    sqsize,
@@ -1823,13 +1835,17 @@ static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double 
     }
     return 0;
 }
-
+/*
+-1 错误，解码失败
+0  解码ok，丢该帧
+1  解码ok，没有丢帧
+*/
 static int get_video_frame(VideoState *is, AVFrame *frame)
 {
     int got_picture;
 
     if ((got_picture = decoder_decode_frame(&is->viddec, frame, NULL)) < 0)
-        return -1;
+        return -1; /*解码失败，返回-1，代表错误*/
 
     if (got_picture) {
         double dpts = NAN;
@@ -1857,7 +1873,7 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
         }
     }
 
-    return got_picture;
+    return got_picture; /*0 代表丢帧*/
 }
 
 #if CONFIG_AVFILTER
@@ -2208,7 +2224,7 @@ static int video_thread(void *arg)
     }
 
     for (;;) {
-        ret = get_video_frame(is, frame); /*解码一帧，填充在此*/
+        ret = get_video_frame(is, frame); /*解码一视频帧，填充在此*/
         if (ret < 0)
             goto the_end;
         if (!ret)
@@ -2824,6 +2840,41 @@ static int is_realtime(AVFormatContext *s)
         return 1;
     return 0;
 }
+/*谁同步到谁呢？*/
+static void dlog(char * str){
+    fprintf(stderr, "%d\n", str);
+
+}
+
+static void check_master_sync_type(VideoState *is) {
+    int type = get_master_sync_type(is);
+    switch (type) {
+           case AV_SYNC_VIDEO_MASTER:
+              // av_log(NULL, AV_LOG_INFO,"%4d AV_SYNC_VIDEO_MASTER",AV_SYNC_VIDEO_MASTER);
+               dlog("AV_SYNC_VIDEO_MASTER");
+               break;
+           case AV_SYNC_AUDIO_MASTER:
+                av_log(NULL, AV_LOG_INFO,"%4d AV_SYNC_AUDIO_MASTER",AV_SYNC_AUDIO_MASTER);                
+               dlog("AV_SYNC_AUDIO_MASTER");
+               break;
+           case AV_SYNC_EXTERNAL_CLOCK:
+                av_log(NULL, AV_LOG_INFO,"%4d AV_SYNC_EXTERNAL_CLOCK",AV_SYNC_EXTERNAL_CLOCK);      
+           default:
+               av_log(NULL, AV_LOG_INFO,"%4d unkown master sync type",type);               
+               dlog("unkown master sync type");
+               break;
+       }
+    if(is->audio_st!=NULL){
+        av_log(NULL, AV_LOG_INFO,"---HAS AUDIO STREAM---\n");
+    }else{
+		av_log(NULL, AV_LOG_FATAL, "---NO AUDIO STREAM----\n");
+    }
+    if(is->video_st!=NULL){
+        av_log(NULL, AV_LOG_INFO,"---HAS video STREAM---\n");
+    }else{
+		av_log(NULL, AV_LOG_FATAL, "---NO video STREAM----\n");
+    }
+}
 
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void *arg)
@@ -2933,9 +2984,11 @@ static int read_thread(void *arg)
 
     is->realtime = is_realtime(ic);
 
-    if (show_status)
+    if (show_status){
         av_dump_format(ic, 0, is->filename, 0);
-
+        /*到了这里也是没有音频和视频流!!!!!*/
+        check_master_sync_type(is);
+    }
     for (i = 0; i < ic->nb_streams; i++) {
         AVStream *st = ic->streams[i];
         enum AVMediaType type = st->codec->codec_type;
@@ -3001,6 +3054,8 @@ static int read_thread(void *arg)
         ret = -1;
         goto fail;
     }
+    /*到这里确实ok了，因为上面打开了两个流，确实是同步到音频作为主时钟*/
+    check_master_sync_type(is);
 
     if (infinite_buffer < 0 && is->realtime)
         infinite_buffer = 1;
@@ -3190,6 +3245,7 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)
     is->audio_volume = SDL_MIX_MAXVOLUME;
     is->muted = 0;
     is->av_sync_type = av_sync_type;
+    av_log(NULL, AV_LOG_FATAL,"set sync type [%d]",is->av_sync_type); /*默认设置为0，AUDIO MASTER*/
     is->read_tid     = SDL_CreateThread(read_thread, is);
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
@@ -3752,6 +3808,7 @@ void show_help_default(const char *opt, const char *arg)
            );
 }
 
+
 static int lockmgr(void **mtx, enum AVLockOp op)
 {
    switch(op) {
@@ -3852,6 +3909,8 @@ int main(int argc, char **argv)
         av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
         do_exit(NULL);
     }
+    /*想知道谁同步到谁*/
+    check_master_sync_type(is); /*这个时候还没真正打开音视频流，貌似因为网络流没有下回来要等到APPLE HLS模块解析ok*/
 
     event_loop(is);
 
