@@ -317,6 +317,9 @@ typedef struct VideoState {
     double dropEarly_dpts;
     double dropEarly_masterClock;
     double dropEarly_fabsDiff;
+    /*音频时间戳大于视频 AV 差之最大值*/    
+    double AVDeltaMax;
+    double VADeltaMax;
 } VideoState;
 
 /* options specified by the user */
@@ -1894,8 +1897,38 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
                     is->dropEarly_dpts=dpts; /*当前视频帧的时间戳*/
                     is->dropEarly_masterClock=get_master_clock( is);
                     is->dropEarly_fabsDiff= fabs(diff);
-                   // LOGD("---TEST---TEST----");
+                    #if 0
                     LOGD("DROPEARLY v=%0.3f m_a=%0.3f d=%0.3f lf[%0.3f] s=%d n=%d", is->dropEarly_dpts,is->dropEarly_masterClock,is->dropEarly_fabsDiff,is->frame_last_filter_delay/*0.000*/,is->viddec.pkt_serial/*这个值是1*/,is->videoq.nb_packets );
+                    #else /*改变了一些打印值*/
+                    
+                        /*这个计算的是时钟的差值*/
+                        double  av_diff = 0;
+                        /*计算av_diff*/
+                         if (is->audio_st && is->video_st) /*音频和视频都有  音频时钟 - 视频时钟*/
+                            av_diff = get_clock(&is->audclk) - get_clock(&is->vidclk);
+                         else if (is->video_st) /*只有视频 主时钟- 视频时钟*/
+                            av_diff = get_master_clock(is) - get_clock(&is->vidclk);
+                         else if (is->audio_st) /*只有音频  主时钟 - 音频时钟 */
+                            av_diff = get_master_clock(is) - get_clock(&is->audclk);
+                         
+                    
+                    double delta= dpts-is->dropEarly_masterClock; /*V-A*/
+                    char * showDelta=(delta>0)?"V>A":"V<A";                     
+                    if(delta > 0 ){     /*V-A*/     
+                        if(delta>is->VADeltaMax){
+                            is->VADeltaMax=delta;
+                        }
+                    }else{
+                        if ( delta < 0 ){/*V-A*/
+                            if(is->dropEarly_fabsDiff > is->AVDeltaMax){
+                                is->AVDeltaMax = is->dropEarly_fabsDiff;
+                            }
+                        }else{
+                            LOGD("=====DELTA ==0 ,COULD NOT HAPPEDN ???");
+                        }
+                    }
+                    LOGD("DROPEARLY v=%0.3f m_a=%0.3f d=%0.3f[%s] fd=%7.3f vad=%0.3f avd=%0.3f n=%d", is->dropEarly_dpts,is->dropEarly_masterClock,is->dropEarly_fabsDiff,showDelta,av_diff,is->VADeltaMax,is->AVDeltaMax,is->videoq.nb_packets );
+                    #endif
                     is->frame_drops_early++;  /*主要是在这里*/
                     av_frame_unref(frame);
                     got_picture = 0;
@@ -3251,6 +3284,9 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)
     is->ytop    = 0;
     is->xleft   = 0;
 
+    /*初始化测试所需*/
+    is->AVDeltaMax=0;
+    is->VADeltaMax=0;
     /* start video display */
     if (frame_queue_init(&is->pictq, &is->videoq, VIDEO_PICTURE_QUEUE_SIZE, 1) < 0)
         goto fail;
