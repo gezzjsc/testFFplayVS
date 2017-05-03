@@ -122,10 +122,12 @@
   <ItemGroup>
     <ClCompile Include="cmdutils.c" />
     <ClCompile Include="ffplay.c" />
+    <ClCompile Include="log_win32.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="cmdutils.h" />
     <ClInclude Include="config.h" />
+    <ClInclude Include="log_win32.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

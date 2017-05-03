@@ -57,6 +57,7 @@
 #include <SDL_thread.h>
 
 #include "cmdutils.h"
+#include "log_win32.h"
 
 #include <assert.h>
 
@@ -311,6 +312,11 @@ typedef struct VideoState {
     int last_video_stream, last_audio_stream, last_subtitle_stream;
 
     SDL_cond *continue_read_thread;
+
+    /*测试用*/
+    double dropEarly_dpts;
+    double dropEarly_masterClock;
+    double dropEarly_fabsDiff;
 } VideoState;
 
 /* options specified by the user */
@@ -1661,12 +1667,13 @@ display:
             M-V, M-A means video stream only, audio stream only respectively.
             */
             av_log(NULL, AV_LOG_INFO,
-                   "%7.2f %s:%7.3f fd=%4d(e=%4d l=%4d) aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
+                   "%7.2f %s:%7.3f fd=%4d(e=%d l=%d v=%0.3f m=%0.3f d=%0.3f) aq=%5dKB vq=%5dKB sq=%5dB f=%"PRId64"/%"PRId64"   \r",
                    get_master_clock(is)/*主时钟*/,
                    (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")), /*音视频都有，显示 A-V*/
                    av_diff /*差值*/,
                    is->frame_drops_early + is->frame_drops_late  /*要丢掉，快速+1的时候会音频一卡一卡，然后aq和vq都是0*/,
-                   is->frame_drops_early/*主要是这里丢弃，而且A-V是负数，比如-0.1**就会出发*/,is->frame_drops_late,
+                   is->frame_drops_early/*主要是这里丢弃，而且A-V是负数，比如-0.1**就会出发*/,is->frame_drops_late,                   
+                   is->dropEarly_dpts,is->dropEarly_masterClock,is->dropEarly_fabsDiff,
                    aqsize / 1024,
                    vqsize / 1024,
                    sqsize,
@@ -1851,21 +1858,27 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
         double dpts = NAN;
 
         if (frame->pts != AV_NOPTS_VALUE)
-            dpts = av_q2d(is->video_st->time_base) * frame->pts;
+            dpts = av_q2d(is->video_st->time_base) * frame->pts; /*得到的ms为单位的时间吧*/
 
         frame->sample_aspect_ratio = av_guess_sample_aspect_ratio(is->ic, is->video_st, frame);
 
         is->viddec_width  = frame->width;
         is->viddec_height = frame->height;
-
-        if (framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
+        /*主时钟不是视频，所以可以丢掉视频*/
+        if (framedrop>0 || (framedrop /*-1 也是非零*/ && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
             if (frame->pts != AV_NOPTS_VALUE) {
                 double diff = dpts - get_master_clock(is);
                 if (!isnan(diff) && fabs(diff) < AV_NOSYNC_THRESHOLD &&
                     diff - is->frame_last_filter_delay < 0 &&
                     is->viddec.pkt_serial == is->vidclk.serial &&
                     is->videoq.nb_packets) {
-                    is->frame_drops_early++;  /*这里也有可能*/
+                    /*在这里打印输出的格式比较难看*/
+                  //  av_log(NULL,AV_LOG_INFO,"v=%0.3f m=%0.3f d=%0.3f \n",dpts,get_master_clock(is),fabs(diff) );
+                    /*暂存起来跟后面一起输出吧*/
+                    is->dropEarly_dpts=dpts;
+                    is->dropEarly_masterClock=get_master_clock( is);
+                    is->dropEarly_fabsDiff= fabs(diff);
+                    is->frame_drops_early++;  /*主要是在这里*/
                     av_frame_unref(frame);
                     got_picture = 0;
                 }
@@ -2222,7 +2235,7 @@ static int video_thread(void *arg)
 #endif
         return AVERROR(ENOMEM);
     }
-
+    av_log(NULL,AV_LOG_INFO,"---CHECK FRAME_DROP [%d]---",framedrop); /*这个值是-1*/
     for (;;) {
         ret = get_video_frame(is, frame); /*解码一视频帧，填充在此*/
         if (ret < 0)
@@ -3833,6 +3846,7 @@ static int lockmgr(void **mtx, enum AVLockOp op)
 /* Called from the main */
 int main(int argc, char **argv)
 {
+    LOGD("-----MAIN------");
     int flags;
     VideoState *is;
     char dummy_videodriver[] = "SDL_VIDEODRIVER=dummy";
