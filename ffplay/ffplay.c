@@ -282,7 +282,7 @@ typedef struct VideoState {
     AVStream *subtitle_st;
     PacketQueue subtitleq;
 
-    double frame_timer;
+    double frame_timer; /*实际上就是上一帧的播放时间*/
     double frame_last_returned_time;
     double frame_last_filter_delay;
     int video_stream;
@@ -339,7 +339,7 @@ static const char* wanted_stream_spec[AVMEDIA_TYPE_NB] = {0};
 static int seek_by_bytes = -1;
 static int display_disable;
 static int show_status = 1;
-static int av_sync_type = AV_SYNC_AUDIO_MASTER;
+static int av_sync_type = AV_SYNC_AUDIO_MASTER; /*考虑人对视频、和音频的敏感度，在存在音频的情况下，优先选择音频作为主时钟源。*/
 static int64_t start_time = AV_NOPTS_VALUE;
 static int64_t duration = AV_NOPTS_VALUE;
 static int fast = 0;
@@ -1478,6 +1478,7 @@ static double compute_target_delay(double delay, VideoState *is)
     double sync_threshold, diff = 0;
 
     /* update delay to follow master synchronisation source */
+    /*如果发现当前主时钟源不是video，则计算当前视频时钟与主时钟的差值*/
     if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER) {
         /* if video is slave, we try to correct big delays by
            duplicating or deleting a frame */
@@ -1486,13 +1487,17 @@ static double compute_target_delay(double delay, VideoState *is)
         /* skip or repeat frame. We take into account the
            delay to compute the threshold. I still don't know
            if it is the best guess */
+        /*这是在sync的阈值范围min到max以及之前经验计算得到的上个视频帧的持续时间，尽可能选一个折中的值*/
         sync_threshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
         if (!isnan(diff) && fabs(diff) < is->max_frame_duration) {
-            if (diff <= -sync_threshold)
+            /*1 如果当前视频帧落后于主时钟源，则需要减小下一帧画面的等待时间；*/
+            if (diff <= -sync_threshold) /*V小于M（diff是负数，而且超过了阈值），视频有点慢，下一个视频显示的间隔时间要缩短（delay+diff），保证尽快显示*/
                 delay = FFMAX(0, delay + diff);
-            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD)
+            /*2 如果视频帧超前，并且该帧的显示时间大于显示更新门槛，则显示下一帧的时间为超前的时间差加上上一帧的显示时间*/
+            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) /*V比M大，且超过了阈值，视频有点快，上一帧的显示持续时长大于了不需要复制该帧以补偿同步的阈值，那么以diff简单的增大delay，让V慢一点到M*/
                 delay = delay + diff;
-            else if (diff >= sync_threshold)
+            /*3 如果视频帧超前，并且上一帧的显示时间小于显示更新门槛，则采取加倍延时的策略。*/
+            else if (diff >= sync_threshold) /*视频快了，但是上一帧持续显示时间并没有超过复制该帧以同步的阈值,下一帧比上一帧增大一倍的等待时间再显示*/
                 delay = 2 * delay;
         }
     }
@@ -1521,7 +1526,9 @@ static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
-/* called to display each frame */
+/* called to display each frame 
+参考 http://www.jianshu.com/p/daf0a61cc1e0 的讲解
+*/
 static void video_refresh(void *opaque, double *remaining_time)
 {
     VideoState *is = opaque;
@@ -1569,33 +1576,40 @@ retry:
                 goto display;
 
             /* compute nominal 名义上的last_duration */ /*通过计算当前要显示的帧和上一帧pts的差来预测当期帧显示时间---预测--->下一帧的到来时间*/
-            last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔 /*计算上一帧的显示时间(名义上)*/
+            /*计算上一帧的显示时间(名义上)*/
+            last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔 
             if (redisplay)
                 delay = 0.0;
-            else
+            else{
+                /*经过compute_target_delay方法，计算出显示当前帧需要等待的时间。*/
                 delay = compute_target_delay(last_duration, is);  //根据视频时间钟与音频时间钟之间的差值，调节需要延迟的时间
-
-            time= av_gettime_relative()/1000000.0;
-            if (time < is->frame_timer + delay && !redisplay) {
-                *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
-                return;
             }
 
+            time= av_gettime_relative()/1000000.0;
+            /*如果系统时间还没有到当前这一帧的播放时间*/
+            if (time < is->frame_timer + delay /*相加，实际上就是当前这一帧的播放时间*/ && !redisplay) {
+                /*还有这么久要显示该帧*/
+                *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
+                return; /*还不能显示这帧，return出去，继续while对该函数的调用，由于remaining_time被计算了，回到上面之后会休眠*/
+            }
+            /*走到这里，是因为当前这一帧的播放时间已经过了*/
             is->frame_timer += delay;
+            /*当前这帧的播放器时间，和当前系统时间的差值超过了AV_SYNC_THRESHOLD_MAX，必需要做同步矫正了*/
             if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
-                is->frame_timer = time;
+                is->frame_timer = time; /*将当前这一帧的播放时间改为系统时间.后续，还要判断是否需要丢帧，其目的是为后面帧的播放时间重新调整frame_timer*/
 
             SDL_LockMutex(is->pictq.mutex);
             if (!redisplay && !isnan(vp->pts))
                 update_video_pts(is, vp->pts, vp->pos, vp->serial);
             SDL_UnlockMutex(is->pictq.mutex);
 
+            /*如果缓冲区中有更多的数据 */
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
-                if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration){
+                if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration /*且当前的时间已经大于当前帧的持续显示时间，则丢弃当前帧*/){
                     if (!redisplay)
-                        is->frame_drops_late++; /*看来是执行了这里*/
+                        is->frame_drops_late++; /*丢弃当前帧，尝试显示下一帧。*/
                     frame_queue_next(&is->pictq);
                     redisplay = 0;
                     goto retry;
@@ -1623,6 +1637,7 @@ retry:
             }
 
 display:
+            /*以上都通过了，进入正常显示当前帧的流程，调用video_display开始渲染*/
             /* display picture */
             if (!display_disable && is->show_mode == SHOW_MODE_VIDEO)
                 video_display(is);
@@ -3430,6 +3445,12 @@ static void toggle_audio_display(VideoState *is)
     }
 }
 
+/*
+处理同步的过程
+1. 休眠等待，remaining_time的计算在video_refresh中
+2. 调用video_refresh方法，刷新视频帧
+
+*/
 static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
     double remaining_time = 0.0;
     SDL_PumpEvents(); /*不停的循环内部更新消息*/
@@ -3441,8 +3462,10 @@ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
         if (remaining_time > 0.0)
             av_usleep((int64_t)(remaining_time * 1000000.0)); /*使用这个函数来休眠,取代之前版本中的定时器*/
         remaining_time = REFRESH_RATE;
-        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
+        if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh)){
+            /*同步的重点是在video_refresh中*/
             video_refresh(is, &remaining_time);
+        }
         SDL_PumpEvents();
     }
 }
@@ -3482,6 +3505,7 @@ static void event_loop(VideoState *cur_stream)
 
     for (;;) {
         double x;
+        /*音视频同步就在这里，这里头有个while循环*/
         refresh_loop_wait_event(cur_stream, &event);
         switch (event.type) {
         case SDL_KEYDOWN:
