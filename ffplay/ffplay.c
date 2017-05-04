@@ -1478,8 +1478,11 @@ static double compute_target_delay(double delay, VideoState *is)
     double sync_threshold, diff = 0;
 
     /* update delay to follow master synchronisation source */
-    /*如果发现当前主时钟源不是video，则计算当前视频时钟与主时钟的差值*/
+    /*如果发现当前主时钟源不是video，则计算当前视频时钟与主时钟(默认是音频时钟)的差值*/
     if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER) {
+        /*根据偏差的范围进行了调整延迟时间（视频比音频快，加大下一帧的渲染时间，否则缩短时间） 
+    这里有3种情况判断：如果当前视频时间落后于主时钟，需要减小下一帧画面的等待时间；如果视频帧超前了，并且显示时间大于一个阈值（AV_SYNC_FRAMEDUP_THRESHOLD），则显示下一帧的时间为超前的时间差加上上一帧的显示时间；如果视频超前了，并且上一帧的显示时间小于这个阈值，则加倍延时。
+    */
         /* if video is slave, we try to correct big delays by
            duplicating or deleting a frame */
         diff = get_clock(&is->vidclk) - get_master_clock(is);
@@ -1504,7 +1507,7 @@ static double compute_target_delay(double delay, VideoState *is)
 
     av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",
             delay, -diff);
-
+    /*偏差值就是后面进行是否抛帧或sleep的判断依据。*/
     return delay;
 }
 
@@ -1570,7 +1573,7 @@ retry:
             }
 
             if (lastvp->serial != vp->serial && !redisplay)
-                is->frame_timer = av_gettime_relative() / 1000000.0;
+                is->frame_timer = av_gettime_relative() / 1000000.0; /*实际上就是上一帧显示的时间*/
 
             if (is->paused) /*如果暂停中*/
                 goto display;
@@ -3497,7 +3500,9 @@ static void seek_chapter(VideoState *is, int incr)
                                  AV_TIME_BASE_Q), 0, 0);
 }
 
-/* handle an event sent by the GUI */
+/* handle an event sent by the GUI 
+事件处理，event_loop->refresh_loop_wait_event-> video_refresh,通过这个顺序进行视频的display
+*/
 static void event_loop(VideoState *cur_stream)
 {
     SDL_Event event;
