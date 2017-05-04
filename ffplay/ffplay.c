@@ -1529,24 +1529,24 @@ static void video_refresh(void *opaque, double *remaining_time)
 
     Frame *sp, *sp2;
 
-    if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime)
+    if (!is->paused && get_master_sync_type(is) == AV_SYNC_EXTERNAL_CLOCK && is->realtime) /*如果用外部时钟同步的话*/
         check_external_clock_speed(is);
 
     if (!display_disable && is->show_mode != SHOW_MODE_VIDEO && is->audio_st) {
         time = av_gettime_relative() / 1000000.0;
         if (is->force_refresh || is->last_vis_time + rdftspeed < time) {
-            video_display(is);
-            is->last_vis_time = time;
+            video_display(is); /*强制刷新视频*/
+            is->last_vis_time = time; /*记录本次的时间*/
         }
         *remaining_time = FFMIN(*remaining_time, is->last_vis_time + rdftspeed - time);
     }
-
+    /*redisplay 在这次提交被干掉 https://github.com/FFmpeg/FFmpeg/commit/37d201aad9f7e7f233955345aee1198421a68f5e*/
     if (is->video_st) {
-        int redisplay = 0;
+        int redisplay = 0; 
         if (is->force_refresh)
             redisplay = frame_queue_prev(&is->pictq);
 retry:
-        if (frame_queue_nb_remaining(&is->pictq) == 0) {
+        if (frame_queue_nb_remaining(&is->pictq) == 0) { /*如果图片缓冲区没有数据*/
             // nothing to do, no picture to display in the queue  图片队列里没有图像，啥都干不成
         } else { /*出队图片*/
             double last_duration, duration, delay;
@@ -1568,8 +1568,8 @@ retry:
             if (is->paused) /*如果暂停中*/
                 goto display;
 
-            /* compute nominal 名义上的last_duration */
-            last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔
+            /* compute nominal 名义上的last_duration */ /*通过计算当前要显示的帧和上一帧pts的差来预测当期帧显示时间---预测--->下一帧的到来时间*/
+            last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔 /*计算上一帧的显示时间(名义上)*/
             if (redisplay)
                 delay = 0.0;
             else
@@ -3432,14 +3432,14 @@ static void toggle_audio_display(VideoState *is)
 
 static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
     double remaining_time = 0.0;
-    SDL_PumpEvents();
+    SDL_PumpEvents(); /*不停的循环内部更新消息*/
     while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_ALLEVENTS)) {
         if (!cursor_hidden && av_gettime_relative() - cursor_last_shown > CURSOR_HIDE_DELAY) {
             SDL_ShowCursor(0);
             cursor_hidden = 1;
         }
         if (remaining_time > 0.0)
-            av_usleep((int64_t)(remaining_time * 1000000.0));
+            av_usleep((int64_t)(remaining_time * 1000000.0)); /*使用这个函数来休眠,取代之前版本中的定时器*/
         remaining_time = REFRESH_RATE;
         if (is->show_mode != SHOW_MODE_NONE && (!is->paused || is->force_refresh))
             video_refresh(is, &remaining_time);
