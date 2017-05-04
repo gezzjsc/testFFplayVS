@@ -1473,6 +1473,7 @@ static void step_to_next_frame(VideoState *is)
     is->step = 1;
 }
 
+/*第一帧的播放时间我们可以轻松获取，那么后续帧的播放时间的计算，关键点就在于delay，我们就是根据delay来控制视频播放的速度，从而达到与音频同步的目的*/
 static double compute_target_delay(double delay, VideoState *is)
 {
     double sync_threshold, diff = 0;
@@ -1497,6 +1498,10 @@ static double compute_target_delay(double delay, VideoState *is)
             if (diff <= -sync_threshold) /*V小于M（diff是负数，而且超过了阈值），视频有点慢，下一个视频显示的间隔时间要缩短（delay+diff），保证尽快显示*/
                 delay = FFMAX(0, delay + diff);
             /*2 如果视频帧超前，并且该帧的显示时间大于显示更新门槛，则显示下一帧的时间为超前的时间差加上上一帧的显示时间*/
+            /*大概意思是:本来当视频帧超前的时候,
+22                 我们应该要选择重复该帧或者下面的2倍延时(即加重延时的策略),
+23                 但因为该帧的显示时间大于显示更新门槛,
+24                 所以这个时候不应该以该帧做同步*/
             else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD) /*V比M大，且超过了阈值，视频有点快，上一帧的显示持续时长大于了不需要复制该帧以补偿同步的阈值，那么以diff简单的增大delay，让V慢一点到M*/
                 delay = delay + diff;
             /*3 如果视频帧超前，并且上一帧的显示时间小于显示更新门槛，则采取加倍延时的策略。*/
@@ -1523,6 +1528,7 @@ static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
     }
 }
 
+/*视频帧的pts一般是从0开始，按照帧率往上增加的，此处pts是一个相对值，和系统时间没有关系，对于固定fps，一般是按照1/frame_rate的速度往上增加，可变fps暂            时没研究*/
 static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial) {
     /* update current video pts */
     set_clock(&is->vidclk, pts, serial);
@@ -1572,6 +1578,7 @@ retry:
                 goto retry;
             }
 
+             /*不管是vp的serial还是queue的serial, 在seek操作的时候才会产生变化，更准确的说，应该是packet 队列发生flush操作时*/
             if (lastvp->serial != vp->serial && !redisplay)
                 is->frame_timer = av_gettime_relative() / 1000000.0; /*实际上就是上一帧显示的时间*/
 
@@ -1579,7 +1586,7 @@ retry:
                 goto display;
 
             /* compute nominal 名义上的last_duration */ /*通过计算当前要显示的帧和上一帧pts的差来预测当期帧显示时间---预测--->下一帧的到来时间*/
-            /*计算上一帧的显示时间(名义上)*/
+            /*计算上一帧的显示时间(名义上),    通过pts计算duration，duration是一个videoframe的持续时间，当前帧的pts 减去上一帧的pts*/
             last_duration = vp_duration(is, lastvp, vp); //计算两视频帧间的间隔 
             if (redisplay)
                 delay = 0.0;
@@ -1587,10 +1594,12 @@ retry:
                 /*经过compute_target_delay方法，计算出显示当前帧需要等待的时间。*/
                 delay = compute_target_delay(last_duration, is);  //根据视频时间钟与音频时间钟之间的差值，调节需要延迟的时间
             }
-
+             /*time 为系统当前时间，av_gettime_relative拿到的是1970年1月1日到现在的时间，也就是格林威治时间*/
             time= av_gettime_relative()/1000000.0;
+            /*frame_timer实际上就是上一帧的播放时间，该时间是一个系统时间，而 frame_timer + delay 实际上就是当前这一帧的播放时间*/
             /*如果系统时间还没有到当前这一帧的播放时间*/
             if (time < is->frame_timer + delay /*相加，实际上就是当前这一帧的播放时间*/ && !redisplay) {
+                /*remaining 就是在refresh_loop_wait_event 中还需要睡眠的时间，其实就是现在还没到这一帧的播放时间，我们需要睡眠等待*/
                 /*还有这么久要显示该帧*/
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 return; /*还不能显示这帧，return出去，继续while对该函数的调用，由于remaining_time被计算了，回到上面之后会休眠*/
@@ -1602,17 +1611,21 @@ retry:
                 is->frame_timer = time; /*将当前这一帧的播放时间改为系统时间.后续，还要判断是否需要丢帧，其目的是为后面帧的播放时间重新调整frame_timer*/
 
             SDL_LockMutex(is->pictq.mutex);
-            if (!redisplay && !isnan(vp->pts))
+            if (!redisplay && !isnan(vp->pts)){                
+                /*更新视频的clock，将当前帧的pts和当前系统的时间保存起来，这2个数据将和audio  clock的pts 和系统时间一起计算delay*/
                 update_video_pts(is, vp->pts, vp->pos, vp->serial);
+            }
             SDL_UnlockMutex(is->pictq.mutex);
 
             /*如果缓冲区中有更多的数据 */
             if (frame_queue_nb_remaining(&is->pictq) > 1) {
                 Frame *nextvp = frame_queue_peek_next(&is->pictq);
                 duration = vp_duration(is, vp, nextvp);
+                /*如果延迟时间超过一帧，并且允许丢帧，则进行丢帧处理*/
                 if(!is->step && (redisplay || framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration /*且当前的时间已经大于当前帧的持续显示时间，则丢弃当前帧*/){
                     if (!redisplay)
                         is->frame_drops_late++; /*丢弃当前帧，尝试显示下一帧。*/
+                    /*丢掉延迟的帧，取下一帧*/
                     frame_queue_next(&is->pictq);
                     redisplay = 0;
                     goto retry;
@@ -1641,7 +1654,7 @@ retry:
 
 display:
             /*以上都通过了，进入正常显示当前帧的流程，调用video_display开始渲染*/
-            /* display picture */
+            /* display picture */    /*刷新视频帧*/
             if (!display_disable && is->show_mode == SHOW_MODE_VIDEO)
                 video_display(is);
 
@@ -2638,10 +2651,11 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
 {
     VideoState *is = opaque;
     int audio_size, len1;
-
+    /*当前系统时间*/
     audio_callback_time = av_gettime_relative();
-
+    /*len为SDL中audio buffer的大小，单位是字节，该大小是我们在打开音频设备时设置*/
     while (len > 0) {
+          /*如果audiobuffer中的数据少于SDL需要的数据，则进行解码*/
         if (is->audio_buf_index >= is->audio_buf_size) {
            audio_size = audio_decode_frame(is);
            if (audio_size < 0) {
@@ -2655,6 +2669,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
            }
            is->audio_buf_index = 0;
         }
+        /*判断解码后的数据是否满足SDL需要*/
         len1 = is->audio_buf_size - is->audio_buf_index;
         if (len1 > len)
             len1 = len;
@@ -2672,6 +2687,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
     is->audio_write_buf_size = is->audio_buf_size - is->audio_buf_index;
     /* Let's assume the audio driver that is used by SDL has two periods. */
     if (!isnan(is->audio_clock)) {
+        /*注意第二个参数pts的计算：计算音频已经播放的时间 通过音频的采样率和位深，可以很精确的算出音频播放到哪个点了*/
         set_clock_at(&is->audclk, is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / is->audio_tgt.bytes_per_sec, is->audio_clock_serial, audio_callback_time / 1000000.0);
         sync_clock_to_slave(&is->extclk, &is->audclk);
     }
